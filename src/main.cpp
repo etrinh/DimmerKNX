@@ -73,7 +73,7 @@ struct Button
         }, RISING);
         attachInterrupt(m_pin, [this](){
             m_status = false;
-        }, RISING);
+        }, FALLING);
     }
 
     void loop(uint32_t delta)
@@ -125,6 +125,7 @@ struct Dimmer
         m_params.stairwayTimer1 = knx.paramInt(baseAddr+10);
         m_params.stairwayValue1 = knx.paramInt(baseAddr+14);
         m_params.stairwayTimer2 = knx.paramInt(baseAddr+18);
+        m_params.mode = (Dimmer::PARAMS::Mode)knx.paramByte(baseAddr+22);
         m_GO.onoff = baseGO;
         knx.getGroupObject(m_GO.onoff).dataPointType(DPT_Switch);
         knx.getGroupObject(m_GO.onoff).callback([this](GroupObject& go) {
@@ -177,6 +178,26 @@ struct Dimmer
             case Dimmer::Dimming: move = (m_currentValue < m_targetValue)?Up:Down; break;
             case Dimmer::StandBy: default: break;
         }
+        if (m_params.mode != Dimmer::PARAMS::Simple) {
+            if (m_targetValue / DPT_TO_DAC_FACTOR > m_params.minValue) {
+                if (m_params.mode == Dimmer::PARAMS::Stairway1) {
+                    if (m_timer > m_params.stairwayTimer1) {
+                        move = (m_currentValue < m_params.minValue * DPT_TO_DAC_FACTOR)?Up:Down;
+                        m_targetValue = m_params.minValue * DPT_TO_DAC_FACTOR;
+                    }
+                }
+                else {
+                    if (m_timer > m_params.stairwayTimer2) {
+                        move = (m_currentValue < m_params.minValue * DPT_TO_DAC_FACTOR)?Up:Down;
+                        m_targetValue = m_params.minValue * DPT_TO_DAC_FACTOR;
+                    }
+                    else if (m_timer > m_params.stairwayTimer1) {
+                        move = (m_currentValue < m_params.stairwayValue1 * DPT_TO_DAC_FACTOR)?Up:Down;
+                        m_targetValue = m_params.stairwayValue1 * DPT_TO_DAC_FACTOR;
+                    }
+                }
+            }
+        }
         switch (move) {
             case Up: {
                 m_currentValue = INCREMENT(m_currentValue, m_params.dimmingDownTime * delta, m_targetValue);
@@ -200,27 +221,32 @@ struct Dimmer
             m_currentValue = m_params.maxValue * DPT_TO_DAC_FACTOR;
             dimmingFinished = true;
         }
+        m_timer += delta;
         // send to output
         analogWrite(m_pin, map(m_currentValue, 0, 100 * DPT_TO_DAC_FACTOR, 0, 65535));
         if (dimmingFinished || DIFF(m_currentValue, lastValue) > DPT_TO_DAC_FACTOR) {
+            bool bOn = m_currentValue / DPT_TO_DAC_FACTOR > m_params.minValue;
             if (dimmingFinished) {
+                m_action = Dimmer::StandBy;
+                if (!bOn) m_timer = 0; 
                 // send value to bus
                 knx.getGroupObject(m_GO.valueStatus).value((uint8_t)(m_currentValue / DPT_TO_DAC_FACTOR));
-                knx.getGroupObject(m_GO.status).value(m_currentValue / DPT_TO_DAC_FACTOR > m_params.minValue);
+                knx.getGroupObject(m_GO.status).value(bOn);
             }
             else {
                 knx.getGroupObject(m_GO.valueStatus).valueNoSend((uint8_t)(m_currentValue / DPT_TO_DAC_FACTOR));
-                knx.getGroupObject(m_GO.status).valueNoSend(m_currentValue / DPT_TO_DAC_FACTOR > m_params.minValue);
+                knx.getGroupObject(m_GO.status).valueNoSend(bOn);
             }
         }
     }
   private:
-    struct {
+    struct PARAMS {
       uint8_t minValue = 0;
       uint8_t maxValue = 100;
       uint32_t dimmingUpTime = 100;
       uint32_t dimmingDownTime = 100;
-      uint32_t stairwayTimer1 = 0;  // Wait time After switching On
+      enum Mode : uint8_t { Simple = 0, Stairway1, Stairway2 } mode;
+      uint32_t stairwayTimer1 = 0;  // Wait while On
       uint32_t stairwayValue1 = 0;  // intermediate Value after timer1 
       uint32_t stairwayTimer2 = 0;  // Wait time with Intermediate Value before switching off 
     } m_params;
@@ -228,7 +254,7 @@ struct Dimmer
     enum { StandBy, On, Off, Dimming } m_action = Off;
     uint16_t m_currentValue = 0;
     uint16_t m_targetValue = 0;
-    uint32_t m_stairwayStart1 = 0;
+    uint32_t m_timer = 0;
     uint16_t m_pin = 1;
     struct {
       uint16_t onoff = 1;
@@ -241,6 +267,141 @@ struct Dimmer
   public:
     enum { NBGO = sizeof(m_GO)/sizeof(uint16_t), SIZEPARAMS = sizeof(m_params) };
 } dimmer[ledCount];
+
+struct LightChaser
+{
+    void init(int baseAddr, uint16_t baseGO)
+    {
+        m_params.lightCount = MIN(MAXLIGHTS, knx.paramByte(baseAddr));
+        m_params.timer = knx.paramByte(baseAddr + 1);
+        for (uint8_t i = 0; i < m_params.lightCount; ++i) {
+            m_params.delayOn[i] = knx.paramInt(baseAddr + 5 + i * 4);
+            if (m_maxDelayOn < m_params.delayOn[i]) m_maxDelayOn = m_params.delayOn[i];
+        }
+        for (uint8_t i = 0; i < m_params.lightCount; ++i) {
+            m_params.delayOff[i] = knx.paramInt(baseAddr + 5 + (MAXLIGHTS + i) * 4);
+            if (m_maxDelayOff < m_params.delayOff[i]) m_maxDelayOff = m_params.delayOff[i];
+        }
+
+        m_GO.OnOffUp = baseGO;
+        knx.getGroupObject(m_GO.OnOffUp).dataPointType(DPT_Switch);
+        knx.getGroupObject(m_GO.OnOffUp).callback([this](GroupObject& go) {
+            if (knx.getGroupObject(m_GO.block).value())
+                return;
+            m_action = go.value()?OnUp:OffUp;
+          });
+        m_GO.OnOffDown = baseGO + 1;
+        knx.getGroupObject(m_GO.OnOffDown).dataPointType(DPT_Switch);
+        knx.getGroupObject(m_GO.OnOffDown).callback([this](GroupObject& go) {
+            if (knx.getGroupObject(m_GO.block).value())
+                return;
+            m_action = go.value()?OnDown:OffDown;
+          });
+        m_GO.status = baseGO + 2;
+        knx.getGroupObject(m_GO.status).dataPointType(DPT_Switch);
+        for (uint8_t i = 0; i < m_params.lightCount; ++i) {
+            m_GO.lightOnOff[i] = baseGO + 3 + i;
+            knx.getGroupObject(m_GO.lightOnOff[i]).dataPointType(DPT_Switch);
+        }
+        m_GO.block = baseGO + 3 + MAXLIGHTS;
+        knx.getGroupObject(m_GO.block).dataPointType(DPT_Switch);
+    }
+  
+    void loop(uint32_t delta)
+    {
+        if (m_action == StandBy) return;
+        if (m_action == OnUp) {
+            if (m_timer < m_params.timer ) {
+                m_timer = 0;
+                m_action = OffUp;
+            }
+            else {
+                if (m_timer == 0) {
+                    knx.getGroupObject(m_GO.status).value(true);
+                }
+                for (uint8_t i = 0; i < m_params.lightCount; ++i) {
+                    if (m_timer < m_params.delayOn[i]) {
+                        if (!knx.getGroupObject(m_GO.lightOnOff[i]).value()) {
+                            knx.getGroupObject(m_GO.lightOnOff[i]).value(true);
+                        }
+                    }
+                }
+            }
+        }
+        if (m_action == OffUp) {
+            bool bAllOff = true;
+            for (uint8_t i = 0; i < m_params.lightCount; ++i) {
+                if (m_timer < m_params.delayOff[i]) {
+                    if (knx.getGroupObject(m_GO.lightOnOff[i]).value()) {
+                        knx.getGroupObject(m_GO.lightOnOff[i]).value(false);
+                    }
+                }
+                else bAllOff = false;
+            }
+            if (bAllOff) {
+                knx.getGroupObject(m_GO.status).value(false);
+                m_timer = 0;
+                m_action = StandBy;
+            }
+        }
+        if (m_action == OnDown) {
+            if (m_timer < m_params.timer ) {
+                m_timer = 0;
+                m_action = OffDown;
+            }
+            else {
+                if (m_timer == 0) {
+                    knx.getGroupObject(m_GO.status).value(true);
+                }
+                for (uint8_t i = 0; i < m_params.lightCount; ++i) {
+                    if (m_timer < m_maxDelayOn - m_params.delayOn[m_params.lightCount - 1 - i]) {
+                        if (!knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value()) {
+                            knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value(true);
+                        }
+                    }
+                }
+            }
+        }
+        if (m_action == OffDown) {
+            bool bAllOff = true;
+            for (uint8_t i = 0; i < m_params.lightCount; ++i) {
+                if (m_timer < m_maxDelayOff - m_params.delayOff[m_params.lightCount - 1 - i]) {
+                    if (knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value()) {
+                        knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value(false);
+                    }
+                }
+                else bAllOff = false;
+            }
+            if (bAllOff) {
+                knx.getGroupObject(m_GO.status).value(false);
+                m_timer = 0;
+                m_action = StandBy;
+            }
+        }
+        m_timer += delta;
+    }
+  private:
+    enum { MAXLIGHTS = 16};
+    struct PARAMS {
+      uint8_t lightCount = 0;
+      uint32_t timer;
+      uint32_t delayOn[MAXLIGHTS];
+      uint32_t delayOff[MAXLIGHTS];
+    } m_params;
+    uint32_t m_maxDelayOn = 0;
+    uint32_t m_maxDelayOff = 0;
+    enum { StandBy, OnUp, OffUp, OnDown, OffDown } m_action = StandBy;
+    uint32_t m_timer = 0;
+    struct {
+      uint16_t OnOffUp;
+      uint16_t OnOffDown;
+      uint16_t status;
+      uint16_t lightOnOff[MAXLIGHTS];
+      uint16_t block;
+    } m_GO;
+  public:
+    enum { NBGO = sizeof(m_GO)/sizeof(uint16_t), SIZEPARAMS = sizeof(m_params) };
+} chaser;
 
 void setup()
 {
@@ -263,6 +424,7 @@ void setup()
         for (uint16_t i = 0; i < ledCount; ++i, offsetGO += Dimmer::NBGO, offsetParam += Dimmer::SIZEPARAMS) {
             dimmer[i].init(offsetParam, offsetGO, ledPins[i]);
         }
+        chaser.init(offsetParam, offsetGO);
     }
 
     // start the framework.
@@ -286,6 +448,7 @@ void loop()
             for (int i = 0; i < ledCount; ++i) {
                 dimmer[i].loop(delta);
             }
+            chaser.loop(delta);
             lastTime = time;
         }
     }
