@@ -8,8 +8,8 @@
 #include <Arduino.h>
 #include <knx.h>
 
-#define PIN_PROG_SWITCH   PB5
-#define PIN_PROG_LED      PA4
+#define PIN_PROG_SWITCH   PA6
+#define PIN_PROG_LED      PA7
 #define PROG_TIMEOUT      ( 15 * 60 * 1000 )    // 15 mins
 #define PIN_TPUART_RX     PB6   // stm32 knx uses Serial2 (pins 16,17)
 #define PIN_TPUART_TX     PB7
@@ -20,7 +20,7 @@
 #define DPT_TO_DAC_FACTOR   (10)
 
 #define PIN_IN1           PA5
-#define PIN_IN2           PA6
+#define PIN_IN2           PA4
 
 #define MIN(X,Y)    ((X)<(Y)?(X):(Y))
 #define MAX(X,Y)    ((X)>(Y)?(X):(Y))
@@ -28,7 +28,7 @@
 #define INCREMENT(A,B,M)  (((M)-(B))<(A)?(M):(A)+(B))
 #define DECREMENT(A,B,M)  (((M)+(B))>(A)?(M):(A)-(B))
 
-static const uint16_t ledPins[] = { PA8, PA9, PA10, PA11, PA3, PA1, PA0};
+static const uint16_t ledPins[] = { PA11, PA10, PA9, PA8, PA3, PA1, PA0};
 enum { ledCount = sizeof(ledPins)/sizeof(ledPins[0]) };
 
 static const uint16_t buttonPins[] = { PIN_IN1, PIN_IN2 };
@@ -54,18 +54,21 @@ struct Button
         m_params.value1byteOff = knx.paramInt(baseAddr+9);
         m_GO.status = baseGO;
         knx.getGroupObject(m_GO.status).dataPointType(DPT_Switch);
-        knx.getGroupObject(m_GO.status).callback([this](GroupObject& go) {
-                m_status = (uint8_t)go.value() != m_params.value1bitOff;
-            });
         m_GO.status1byte = baseGO + 1;
         knx.getGroupObject(m_GO.status1byte).dataPointType(DPT_Scaling);
-        knx.getGroupObject(m_GO.status1byte).callback([this](GroupObject& go) {
-                m_status = (uint8_t)go.value() != m_params.value1byteOff;
-            });
         m_GO.trigger = baseGO + 2;
         knx.getGroupObject(m_GO.trigger).dataPointType(DPT_Switch);
         m_GO.trigger1byte = baseGO + 3;
         knx.getGroupObject(m_GO.trigger1byte).dataPointType(DPT_Scaling);
+
+        // Callbacks
+        knx.getGroupObject(m_GO.status).callback([this](GroupObject& go) {
+                m_status = (uint8_t)go.value() != m_params.value1bitOff;
+            });
+        knx.getGroupObject(m_GO.status1byte).callback([this](GroupObject& go) {
+                m_status = (uint8_t)go.value() != m_params.value1byteOff;
+            });
+
         m_pin = pinNb;
         pinMode(m_pin, INPUT);
         attachInterrupt(m_pin, [this](){
@@ -76,9 +79,8 @@ struct Button
         }, FALLING);
     }
 
-    void loop(uint32_t delta)
+    void loop()
     {
-        (void) delta;
         if (m_lastEmittedStatus != m_status) {
             knx.getGroupObject(m_GO.status).value(m_status?m_params.value1bitOn:m_params.value1bitOff);
             knx.getGroupObject(m_GO.status1byte).value(m_status?m_params.value1byteOn:m_params.value1byteOff);
@@ -128,6 +130,18 @@ struct Dimmer
         m_params.mode = (Dimmer::PARAMS::Mode)knx.paramByte(baseAddr+22);
         m_GO.onoff = baseGO;
         knx.getGroupObject(m_GO.onoff).dataPointType(DPT_Switch);
+        m_GO.status = baseGO+1;
+        knx.getGroupObject(m_GO.status).dataPointType(DPT_Switch);
+        m_GO.value = baseGO+2;
+        knx.getGroupObject(m_GO.value).dataPointType(DPT_Scaling);
+        m_GO.valueStatus = baseGO+3;
+        knx.getGroupObject(m_GO.valueStatus).dataPointType(DPT_Scaling);
+        m_GO.updown = baseGO+4;
+        knx.getGroupObject(m_GO.updown).dataPointType(DPT_UpDown);
+        m_GO.block = baseGO+5;
+        knx.getGroupObject(m_GO.block).dataPointType(DPT_Switch);
+
+        // Callbacks
         knx.getGroupObject(m_GO.onoff).callback([this](GroupObject& go) {
             if (knx.getGroupObject(m_GO.block).value())
                 return;
@@ -140,20 +154,12 @@ struct Dimmer
                 m_targetValue = 0;
             }
           });
-        m_GO.status = baseGO+1;
-        knx.getGroupObject(m_GO.status).dataPointType(DPT_Switch);
-        m_GO.value = baseGO+2;
-        knx.getGroupObject(m_GO.value).dataPointType(DPT_Scaling);
         knx.getGroupObject(m_GO.value).callback([this](GroupObject& go) {
             if (knx.getGroupObject(m_GO.block).value())
                 return;
             m_action = Dimming;
             m_targetValue = (int16_t)go.value() * DPT_TO_DAC_FACTOR;
           });
-        m_GO.valueStatus = baseGO+3;
-        knx.getGroupObject(m_GO.valueStatus).dataPointType(DPT_Scaling);
-        m_GO.updown = baseGO+4;
-        knx.getGroupObject(m_GO.updown).dataPointType(DPT_UpDown);
         knx.getGroupObject(m_GO.updown).callback([this](GroupObject& go) {
             if (knx.getGroupObject(m_GO.block).value())
                 return;
@@ -163,8 +169,6 @@ struct Dimmer
                 m_targetValue = val;
             }
           });
-        m_GO.block = baseGO+5;
-        knx.getGroupObject(m_GO.block).dataPointType(DPT_Switch);
     }
   
     void loop(uint32_t delta)
@@ -285,18 +289,8 @@ struct LightChaser
 
         m_GO.OnOffUp = baseGO;
         knx.getGroupObject(m_GO.OnOffUp).dataPointType(DPT_Switch);
-        knx.getGroupObject(m_GO.OnOffUp).callback([this](GroupObject& go) {
-            if (knx.getGroupObject(m_GO.block).value())
-                return;
-            m_action = go.value()?OnUp:OffUp;
-          });
         m_GO.OnOffDown = baseGO + 1;
         knx.getGroupObject(m_GO.OnOffDown).dataPointType(DPT_Switch);
-        knx.getGroupObject(m_GO.OnOffDown).callback([this](GroupObject& go) {
-            if (knx.getGroupObject(m_GO.block).value())
-                return;
-            m_action = go.value()?OnDown:OffDown;
-          });
         m_GO.status = baseGO + 2;
         knx.getGroupObject(m_GO.status).dataPointType(DPT_Switch);
         for (uint8_t i = 0; i < m_params.lightCount; ++i) {
@@ -305,6 +299,18 @@ struct LightChaser
         }
         m_GO.block = baseGO + 3 + MAXLIGHTS;
         knx.getGroupObject(m_GO.block).dataPointType(DPT_Switch);
+
+        // Callbacks
+        knx.getGroupObject(m_GO.OnOffUp).callback([this](GroupObject& go) {
+            if (knx.getGroupObject(m_GO.block).value())
+                return;
+            m_action = go.value()?OnUp:OffUp;
+          });
+        knx.getGroupObject(m_GO.OnOffDown).callback([this](GroupObject& go) {
+            if (knx.getGroupObject(m_GO.block).value())
+                return;
+            m_action = go.value()?OnDown:OffDown;
+          });
     }
   
     void loop(uint32_t delta)
@@ -321,9 +327,7 @@ struct LightChaser
                 }
                 for (uint8_t i = 0; i < m_params.lightCount; ++i) {
                     if (m_timer < m_params.delayOn[i]) {
-                        if (!knx.getGroupObject(m_GO.lightOnOff[i]).value()) {
-                            knx.getGroupObject(m_GO.lightOnOff[i]).value(true);
-                        }
+                        knx.getGroupObject(m_GO.lightOnOff[i]).value(true);
                     }
                 }
             }
@@ -332,9 +336,7 @@ struct LightChaser
             bool bAllOff = true;
             for (uint8_t i = 0; i < m_params.lightCount; ++i) {
                 if (m_timer < m_params.delayOff[i]) {
-                    if (knx.getGroupObject(m_GO.lightOnOff[i]).value()) {
-                        knx.getGroupObject(m_GO.lightOnOff[i]).value(false);
-                    }
+                    knx.getGroupObject(m_GO.lightOnOff[i]).value(false);
                 }
                 else bAllOff = false;
             }
@@ -355,9 +357,7 @@ struct LightChaser
                 }
                 for (uint8_t i = 0; i < m_params.lightCount; ++i) {
                     if (m_timer < m_maxDelayOn - m_params.delayOn[m_params.lightCount - 1 - i]) {
-                        if (!knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value()) {
-                            knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value(true);
-                        }
+                        knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value(true);
                     }
                 }
             }
@@ -366,9 +366,7 @@ struct LightChaser
             bool bAllOff = true;
             for (uint8_t i = 0; i < m_params.lightCount; ++i) {
                 if (m_timer < m_maxDelayOff - m_params.delayOff[m_params.lightCount - 1 - i]) {
-                    if (knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value()) {
-                        knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value(false);
-                    }
+                    knx.getGroupObject(m_GO.lightOnOff[m_params.lightCount - 1 - i]).value(false);
                 }
                 else bAllOff = false;
             }
@@ -381,7 +379,7 @@ struct LightChaser
         m_timer += delta;
     }
   private:
-    enum { MAXLIGHTS = 16};
+    enum { MAXLIGHTS = 16 };
     struct PARAMS {
       uint8_t lightCount = 0;
       uint32_t timer;
@@ -403,6 +401,16 @@ struct LightChaser
     enum { NBGO = sizeof(m_GO)/sizeof(uint16_t), SIZEPARAMS = sizeof(m_params) };
 } chaser;
 
+static void blink(int nb) {
+    for (int i = 0; i < nb; ++i) {
+        digitalWrite(PIN_PROG_LED, 1);
+        delay(250);
+        digitalWrite(PIN_PROG_LED, 0);
+        delay(250);
+    }
+    delay(1000);
+}
+
 void setup()
 {
     ArduinoPlatform::SerialDebug = &nullDevice;
@@ -413,11 +421,24 @@ void setup()
     knx.buttonPin(PIN_PROG_SWITCH);
     knx.buttonPinInterruptOn(RISING);
 
+    pinMode(PIN_PROG_LED, OUTPUT);
+    blink(1);
+
+    // Init device
+    knx.version(1);                                         // PID_VERSION
+    static const uint8_t orderNumber = 0;
+    knx.orderNumber(&orderNumber);                          // PID_ORDER_INFO
+    // knx.manufacturerId(0xfa);                               // PID_SERIAL_NUMBER (2 first bytes) - 0xfa for KNX Association
+    knx.bauNumber(0x44494d52 /* = 'DIMR'*/);     // PID_SERIAL_NUMBER (4 last bytes)
+    static const uint8_t hardwareType [] = { 0, 0, 0, 0, 0, 0 };
+    knx.hardwareType(hardwareType);                         // PID_HARDWARE_TYPE
+    knx.bau().deviceObject().induvidualAddress(1);
+
     // read adress table, association table, groupobject table and parameters from eeprom
     knx.readMemory();
 
     if (knx.configured()) {
-        uint16_t offsetGO = 0; int offsetParam = 0;
+        uint16_t offsetGO = 1; int offsetParam = 0;
         for (uint16_t i = 0; i < buttonCount; ++i, offsetGO += Button::NBGO, offsetParam += Button::SIZEPARAMS) {
             button[i].init(offsetParam, offsetGO, ledPins[i]);
         }
@@ -429,6 +450,9 @@ void setup()
 
     // start the framework.
     knx.start();
+
+    pinMode(PIN_PROG_LED, OUTPUT);
+    blink(1);
 }
 
 void loop() 
@@ -438,12 +462,12 @@ void loop()
 
     // only run the application code if the device was configured with ETS
     if(knx.configured()) {
-        static uint32_t lastTime = 0;
+        static uint32_t lastTime = millis();
         uint32_t time = millis();
         const uint32_t delta = time - lastTime;
         if (delta > 10) {
             for (int i = 0; i < buttonCount; ++i) {
-                button[i].loop(delta);
+                button[i].loop();
             }
             for (int i = 0; i < ledCount; ++i) {
                 dimmer[i].loop(delta);
